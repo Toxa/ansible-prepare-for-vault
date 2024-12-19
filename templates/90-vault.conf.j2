@@ -1,0 +1,9 @@
+TrustedUserCAKeys /etc/ssh/trusted-user-ca-keys.pem
+AuthorizedKeysFile      none
+PermitRootLogin no
+ExposeAuthInfo yes
+
+Match User superuser
+	AuthorizedKeysFile      none
+	AuthenticationMethods publickey
+	PasswordAuthentication no

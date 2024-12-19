@@ -1,0 +1,63 @@
+---
+- name: Update bash script for password rotate
+  hosts: vault
+  gather_facts: true
+  environment:
+    TMPDIR: "{{ ansible_env.HOME }}"
+
+  tasks:
+    - name: Get Role-id
+      community.hashi_vault.vault_read:
+        url: "https://vault.example.com:8200"
+        path: "auth/approle/role/pass-rotation/role-id"
+      register: vault_role_id
+      delegate_to: localhost
+
+    - name: Get Secret-id
+      community.hashi_vault.vault_write:
+        url: "https://vault.example.com:8200"
+        path: "auth/approle/role/pass-rotation/secret-id"
+        data:
+          cidr_list: "{{ hostvars[inventory_hostname]['ansible_default_ipv4']['address'] }}/32"
+      register: vault_secret_id
+      delegate_to: localhost
+
+    - name: "Get become Password"
+      community.hashi_vault.vault_kv2_get:
+        url: "https://vault.example.com:8200"
+        engine_mount_point: "infra"
+        path: "servers/{{ inventory_hostname }}/ssh"
+      register: become_password
+      delegate_to: localhost
+
+    - name: Set become Password
+      set_fact:
+        ansible_become_password: "{{ become_password.secret.sysadm }}"
+
+    - name: Copy password rotate script
+      ansible.builtin.template:
+        src: templates/vault-pass-rotate.sh.j2
+        dest: /root/bin/vault-pass-rotate.sh
+        owner: root
+        group: root
+        mode: '700'
+      become: true
+
+    - name: Run password rotate for root
+      ansible.builtin.command: /root/bin/vault-pass-rotate.sh root
+      register: result
+      changed_when: result.rc == 0
+      become: true
+
+    - name: Run password rotate for sysadm
+      ansible.builtin.command: /root/bin/vault-pass-rotate.sh sysadm
+      register: result
+      changed_when: result.rc == 0
+      become: true
+
+    - name: Create cron job for sysadm password rotation
+      ansible.builtin.cron:
+        name: "Rotate password for sysadm user"
+        hour: "0"
+        minute: "0"
+        job: "/root/bin/vault-pass-rotate.sh sysadm"

@@ -1,0 +1,102 @@
+---
+- name: Prepare host to use vault
+  become: false
+  hosts: infra
+  gather_facts: true
+  environment:
+    TMPDIR: "{{ ansible_env.HOME }}"
+
+  tasks:
+    - name: Get Role-id
+      community.hashi_vault.vault_read:
+        url: "https://vault.example.com:8200"
+        path: "auth/approle/role/pass-rotation/role-id"
+      register: vault_role_id
+      delegate_to: localhost
+
+    - name: Get Secret-id
+      community.hashi_vault.vault_write:
+        url: "https://vault.example.com:8200"
+        path: "auth/approle/role/pass-rotation/secret-id"
+        data:
+          cidr_list: "{{ hostvars[inventory_hostname].ansible_all_ipv4_addresses
+            | zip_longest([], fillvalue='/32')| map('join')  }}"
+      register: vault_secret_id
+      delegate_to: localhost
+
+    - name: Install required packages
+      ansible.builtin.package:
+        name:
+          - curl
+          - jq
+        state: present
+
+    - name: Get CA file from vault
+      ansible.builtin.get_url:
+        url: https://vault.example.com:8200/v1/ssh-client-signer/public_key
+        dest: /etc/ssh/trusted-user-ca-keys.pem
+
+    - name: Add sshd config options
+      ansible.builtin.template:
+        src: templates/90-vault.conf.j2
+        dest: /etc/ssh/sshd_config.d/90-vault.conf
+        owner: root
+        group: root
+        mode: '0600'
+
+    - name: Restart sshd
+      ansible.builtin.service:
+        name: sshd
+        state: restarted
+
+    - name: Add logging mark for bash_history in bashrc
+      ansible.builtin.blockinfile:
+        dest: /etc/bashrc
+        block: "{{ lookup('template', 'templates/bashrc.j2') }}"
+
+    - name: Create /root/bin dir
+      ansible.builtin.file:
+        path: /root/bin
+        state: directory
+        owner: root
+        group: root
+        mode: '770'
+
+    - name: Copy password rotate script
+      ansible.builtin.template:
+        src: templates/vault-pass-rotate.sh.j2
+        dest: /root/bin/vault-pass-rotate.sh
+        owner: root
+        group: root
+        mode: '700'
+
+    - name: Add sysadm user
+      ansible.builtin.user:
+        name: sysadm
+
+    - name: Create sudoers.d/sysadm file
+      ansible.builtin.copy:
+        dest: /etc/sudoers.d/sysadm
+        content: "sysadm   ALL=(ALL:ALL) ALL"
+        owner: root
+        group: root
+        mode: '440'
+        validate: /usr/sbin/visudo -cf %s
+
+    - name: Run password rotate for sysadm
+      ansible.builtin.command: /root/bin/vault-pass-rotate.sh sysadm
+      register: result
+      changed_when: result.rc == 0
+
+    - name: Run password rotate for root
+      ansible.builtin.command: /root/bin/vault-pass-rotate.sh root
+      register: result
+      changed_when: result.rc == 0
+
+    - name: Create cron job for sysadm password rotation
+      ansible.builtin.cron:
+        name: "Rotate password for sysadm user"
+        hour: "0"
+        minute: "0"
+        job: "/root/bin/vault-pass-rotate.sh sysadm"
+        user: root

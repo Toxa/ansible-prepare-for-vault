@@ -1,0 +1,41 @@
+#!/bin/bash
+VAULT_ADDR="https://vault.example.com:8200"
+VAULT_ROLE_ID="{{ vault_role_id.data.data.role_id }}"
+VAULT_SECRET_ID="{{ vault_secret_id.data.data.secret_id }}"
+if [[ -z "$1" ]]; then
+  USER="sysadm"
+else
+  USER="$1"
+fi
+
+# Авторизуемся в Vault и получаем токен для записи пароля
+VAULT_TOKEN=$(curl --silent --location $VAULT_ADDR"/v1/auth/approle/login" --header "Content-Type: application/json" --data "{
+  \"role_id\": \"$VAULT_ROLE_ID\",
+  \"secret_id\": \"$VAULT_SECRET_ID\"
+}" | jq -r .auth.client_token
+)
+
+# Генерируем новый пароль в виде парольной фразы и подготавливаем данные для Vault
+
+NEWPASS=$(curl -sS --fail -X POST -H "X-Vault-Token: $VAULT_TOKEN" -H "Content-Type: application/json" --data '{"length":"16","symbols":"1"}'  ${VAULT_ADDR}/v1/gen/password | jq -r '.data|.value')
+JSON="{ \"options\": { \"max_versions\": 12 }, \"data\": { \"${USER}\": \"$NEWPASS\" } }"
+# Сохраняем новый пароль в хранилище Vault
+curl -sS --fail -X PATCH -H "Content-Type: application/merge-patch+json" -H "X-Vault-Token: $VAULT_TOKEN" -H "X-Vault-Request: true" --data "$JSON"  ${VAULT_ADDR}/v1/infra/data/servers/$(hostname)/ssh | grep -q 'request_id'
+retval=$?
+if [[ $retval -ne 0 ]]; then
+  curl -sS --fail -X POST -H "X-Vault-Token: $VAULT_TOKEN" --data "$JSON" ${VAULT_ADDR}/v1/infra/data/servers/$(hostname)/ssh | grep -q 'request_id'
+  retval=$?
+fi
+if [[ $retval -eq 0 ]]; then
+  # После того как записали пароль в хранилище - меняем его на локальной машине
+  echo "$USER:$NEWPASS" | /sbin/chpasswd
+  retval=$?
+    if [[ $retval -eq 0 ]]; then
+      echo -e "${USER}'s password was stored in Vault and updated locally."
+    else
+      echo "Error: ${USER}'s password was stored in Vault but *not* updated locally."
+    fi
+else
+  echo "Error saving new password to Vault. Local password will remain unchanged."
+  exit 1
+fi

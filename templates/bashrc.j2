@@ -1,0 +1,8 @@
+if [[ -n ${SSH_USER_AUTH}  ]]; then
+  grep -q ssh-rsa-cert $SSH_USER_AUTH
+  CERT_USED=$?
+  if [[ $CERT_USED -eq 0 ]]; then
+    LDAP_LOGIN=$(awk '/^publickey/ {print $2,$3}' ${SSH_USER_AUTH} | ssh-keygen -Lf - | grep "Key ID" | awk -F'"' '{print $2}'| cut -d'-' -f 1-3)
+    export HISTTIMEFORMAT="${LDAP_LOGIN}: %d/%m/%y %T "
+  fi
+fi
